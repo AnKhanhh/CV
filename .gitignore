@@ -2,4 +2,6 @@
 /venv
 CV.iml
 /tid2013
-/materials
+/resources
+/results
+*.ipynb
