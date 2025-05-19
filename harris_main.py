@@ -7,7 +7,7 @@ import pandas as pd
 from skimage.feature import peak_local_max
 from scipy.optimize import linear_sum_assignment
 
-# Paper default: Gaussian neighborhood window, 3x3 Sobel to calculate gradient
+# Harris original paper implementation: Gaussian neighborhood window, 3x3 Sobel aperture
 # Opencv's Harris: https://github.com/opencv/opencv/blob/4.x/modules/imgproc/src/corner.cpp#L634
 
 # Dictionary of image gradient kernels
@@ -109,6 +109,7 @@ def harris_pipeline(input_img: np.ndarray,
                     visualize: bool = False) -> Tuple[List[Tuple[int, int, float]], np.ndarray, np.ndarray]:
     """
     Detect Harris corners in the input grayscale image
+
     Returns:
         List of detected corners as (x, y, response_value),
         Original image with detected corners marked in red,
@@ -168,7 +169,7 @@ def find_corner_matches(reference_corners, distorted_corners, max_dist_pixel=3.0
     for i, (x1, y1, _) in enumerate(reference_corners):
         for j, (x2, y2, _) in enumerate(distorted_corners):
             cost_matrix[i, j] = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-    # Match using Hungarian algorithm)
+    # Match using Hungarian algorithm
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
     # Filter valid matches
     valid_matches = [(i, j) for i, j in zip(row_ind, col_ind) if cost_matrix[i, j] < max_dist_pixel]
@@ -250,11 +251,11 @@ def harris_wrapper(test_config,
         print(f"Error loading image at {ref_image_path}")
         return None
 
-    results = []
-
-    # For each parameter combination
     total_iter = len(win_size_list) * len(aperture_size_list) * len(k_list) * len(win_type_list) * len(aperture_type_list)
     print(f"Calculating performance metrics of {total_iter} parameter sets, for image #{img_no} distortion #{distortion_no}:")
+
+    # For each parameter combination
+    results_df = []
     for i, (win_sz, win_tp, ap_sz, ap_tp, k) in enumerate(itertools.product(win_size_list, win_type_list, aperture_size_list, aperture_type_list, k_list)):
         ref_corners, *_ = harris_pipeline(ref_image, k=k, window_size=win_sz, aperture_size=ap_sz)
         print(f"i{i + 1}..", end="✓  ")
@@ -279,25 +280,23 @@ def harris_wrapper(test_config,
                 'dt_no': int(distortion_no),  # distortion no
                 'dt_lv': int(level),  # distortion level
                 'window_sz': float(win_sz),  # harris window size
-                'windows_tp': 1 if win_tp == 'gaussian' else 0,  # uniform=0, gaussian=1
+                'windows_tp': {'uniform': 0, 'gaussian': 1}.get(win_tp),  # uniform=0, gaussian=1
                 'aperture_sz': float(ap_sz),  # gradient window size
                 'aperture_tp': {'sobel': 0, 'prewitt': 1, 'scharr': 2}.get(ap_tp),  # sobel=0, prewitt=1, scharr=2
                 'k_val': float(k),  # harris k value
-                'corners_in_rf': len(ref_corners),  # detected corners in reference image
-                'corners_in_dt': int(len(dist_corners)),  # detected corners in distorted image
                 'corner_matches': int(metrics['num_matches']),  # matches between 2 images
-                'repeatability': round(metrics['repeatability'], 5),  # ratio of matches / reference corners
-                'localization_acc': round(metrics['localization_accuracy'], 5),  # avg distance between matched corners, in px
-                'mean_resp_ratio': round(metrics['response_degradation'], 5)  # avg ratio of distorted / reference response in matched corners
+                'repeatability': metrics['repeatability'],  # ratio of matches / reference corners
+                'localization_acc': metrics['localization_accuracy'],  # avg distance between matched corners, in px
+                'mean_resp_ratio': metrics['response_degradation']  # avg ratio of distorted / reference response in matched corners
             }
-            results.append(result_row)
+            results_df.append(result_row)
 
-    if not results:
+    if not results_df:
         print("No results collected. Check file paths and parameters.")
         return None
 
     # Convert results to DataFrame
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results_df)
     os.makedirs(f"results/distortion_{distortion_no}", exist_ok=True)
     output_filename = f"results/distortion_{distortion_no}/harris_img{img_no}_dist{distortion_no}.csv"
     df.to_csv(output_filename, index=False)
