@@ -3,7 +3,7 @@ import numpy as np
 from pandasgui import show
 
 
-def print_progress_bar(iteration, total, bar_length=100):
+def print_progress_bar(iteration, total, bar_length=50):
     """
     Print a progress bar that updates in place.
     """
@@ -22,12 +22,11 @@ def print_progress_bar(iteration, total, bar_length=100):
         print()
 
 
-# Static variables to modify
-FILE_PATH = "results/distortion_01/harris_metrics_dist01.parquet"
-NUM_ROWS = 10  # Number of rows to read (0 for all rows)
-
-
 def open_pq():
+    # Static variables to modify
+    FILE_PATH = "results/distortion_01/harris_param_combined.parquet"
+    NUM_ROWS = 10  # Number of rows to read (0 for all rows)
+
     try:
         # Read the parquet file
         print(f"Reading file: {FILE_PATH}")

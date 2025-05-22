@@ -78,8 +78,8 @@ def calculate_parameter_performance(df, distortion_no):
     # Print best parameter values
     if not results_df.empty:
         print_best_parameters(results_df)
-        results_df.to_csv(f"results/distortion_{distortion_no}/harris_params.csv", index=False)
-        print(f"\nParameter analysis saved to results/distortion_{distortion_no}/harris_params.csv")
+        results_df.to_parquet(f"results/distortion_{distortion_no}/harris_params_isolated.parquet", index=False)
+        print(f"\nParameter analysis saved to results/distortion_{distortion_no}/harris_params_isolated.parquet")
 
     return results_df
 
@@ -132,14 +132,32 @@ def calculate_level_metrics(data, result):
 
     # Calculate AUC across all distortion levels
     if repeatability_values:
-        result['repeatability_auc'] = np.mean(repeatability_values)
+        # Create arrays with valid values
+        valid_indices = [i for i, v in enumerate(repeatability_values) if not np.isnan(v)]
+        x_coords = [i + 1 for i in valid_indices]  # Distortion levels (1-based)
+        y_values = [repeatability_values[i] for i in valid_indices]
+
+        if y_values:
+            auc = np.trapz(y_values, x=x_coords)
+            x_range = max(x_coords) - min(x_coords)
+            result['repeatability_auc'] = auc / x_range if x_range > 0 else np.mean(y_values)
+        else:
+            result['repeatability_auc'] = float('nan')
     else:
         result['repeatability_auc'] = float('nan')
 
     if localization_values:
-        # Calculate 1/(1+d) for each level and take mean
-        norm_loc_values = [1 / (1 + d) for d in localization_values if not np.isnan(d)]
-        result['localization_auc'] = np.mean(norm_loc_values) if norm_loc_values else float('nan')
+        # Apply normalization 1/(1+d) and filter out NaNs
+        valid_indices = [i for i, v in enumerate(localization_values) if not np.isnan(v)]
+        x_coords = [i + 1 for i in valid_indices]  # Distortion levels (1-based)
+        y_values = [1 / (1 + localization_values[i]) for i in valid_indices]
+
+        if y_values:
+            auc = np.trapz(y_values, x=x_coords)
+            x_range = max(x_coords) - min(x_coords)
+            result['localization_auc'] = auc / x_range if x_range > 0 else np.mean(y_values)
+        else:
+            result['localization_auc'] = float('nan')
     else:
         result['localization_auc'] = float('nan')
 

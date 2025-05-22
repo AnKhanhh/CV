@@ -4,11 +4,8 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 import pandas as pd
-from skimage.feature import peak_local_max
 from scipy.optimize import linear_sum_assignment
-import pyarrow as pa
-import pyarrow.parquet as pq
-from collections import defaultdict
+from skimage.feature import peak_local_max
 import misc
 
 # Harris original paper implementation: Gaussian neighborhood window, 3x3 Sobel aperture
@@ -316,10 +313,6 @@ def harris_wrapper(distortion_no: str,
             if resp_ratios:
                 mean_resp_ratio = np.mean(resp_ratios)
 
-            mean_resp_difference = float('nan')
-            if resp_differences:
-                mean_resp_difference = np.mean(resp_differences)
-
             # Create result row for this parameter set and distortion level
             result_row = {
                 'dt_no': int(distortion_no),
@@ -336,7 +329,7 @@ def harris_wrapper(distortion_no: str,
                 'mean_localization': float(mean_localization),
                 'loc_distances': loc_distances,  # Raw list of localization distances
                 'mean_resp_ratio': float(mean_resp_ratio),
-                'resp_differences': resp_differences,  # Raw list of response differences (ref - dist)
+                'resp_ratios': resp_ratios,  # Raw list of response ratios
             }
 
             # Add to results
@@ -346,7 +339,7 @@ def harris_wrapper(distortion_no: str,
     df = pd.DataFrame(results_df)
 
     # Convert Python lists to numpy arrays
-    for col in ['loc_distances', 'resp_differences']:
+    for col in ['loc_distances', 'resp_ratios']:
         df[col] = df[col].apply(lambda x: np.array(x, dtype=np.float32))
 
     # Save as Parquet
