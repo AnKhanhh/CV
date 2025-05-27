@@ -106,8 +106,7 @@ def harris_core(input_img: np.ndarray,
 def harris_pipeline(input_img: np.ndarray,
                     aperture_size: int = 3, aperture_type: str = 'sobel', border_type: int = cv2.BORDER_REFLECT_101,
                     k: float = 0.04, window_size: int = 5, window_type: str = 'gaussian',
-                    threshold_ratio: float = 0.01, nms_radius: int = 10,
-                    visualize: bool = False) -> Tuple[List[Tuple[int, int, float]], np.ndarray, np.ndarray]:
+                    threshold_ratio: float = 0.01, visualize: bool = False) -> Tuple[List[Tuple[int, int, float]], np.ndarray, np.ndarray]:
     """
     Detect Harris corners in the input grayscale image
 
@@ -131,17 +130,17 @@ def harris_pipeline(input_img: np.ndarray,
 
     # 3. NMS and thresholding
     # For manual implementation: dilation NMS -> thresholding -> dist filtering
+    nms_radius = int(window_size / 2) + 1
     coordinates: Tuple[List[int], List[int]] = peak_local_max(harris_response, min_distance=nms_radius, threshold_rel=threshold_ratio)
 
     # 4. Post-processing steps
     # Refine corners to subpixel
     corner_list: List[Tuple[int, int, float]] = [(x, y, harris_response[y, x]) for y, x in coordinates]
     points = np.float32([corner[:2] for corner in corner_list])
-    subp_win_size = window_size * 2 - 1
-    refined_points = cv2.cornerSubPix(input_img, points, (subp_win_size, subp_win_size), (-1, -1),
+    refined_coords = cv2.cornerSubPix(input_img, points, (5, 5), (-1, -1),
                                       (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
     refined_corner_list = [(point[0], point[1], corner_list[i][2])
-                           for i, point in enumerate(refined_points)]
+                           for i, point in enumerate(refined_coords)]
 
     if visualize:
         # Create corner marking image
@@ -234,7 +233,7 @@ def harris_wrapper(distortion_no: str,
     ):
 
         param_idx += 1
-        misc.print_progress_bar(param_idx,total_iter)
+        misc.print_progress_bar(param_idx, total_iter)
 
         # Pre-calculate for all reference images as ground truth
         ref_corners_dict = {}
@@ -297,7 +296,7 @@ def harris_wrapper(distortion_no: str,
                     # Add response metrics
                     ref_resp = ref_corners[i_ref][2]
                     dist_resp = dist_corners[i_dist][2]
-                    resp_ratios.append(float(dist_resp / ref_resp))       # Ratio: distorted/reference
+                    resp_ratios.append(float(dist_resp / ref_resp))  # Ratio: distorted/reference
                     resp_differences.append(float(ref_resp - dist_resp))  # Difference: reference - distorted
 
             # Calculate aggregate metrics

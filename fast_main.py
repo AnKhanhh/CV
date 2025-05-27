@@ -19,23 +19,20 @@ def generate_circle_offsets(radius):
 
 def calculate_threshold(image, threshold_type, threshold_factor):
     """Calculate adaptive threshold"""
-    if threshold_type == 'range_relative':
-        min_val, max_val = np.min(image), np.max(image)
-        dynamic_range = max_val - min_val
-        return threshold_factor * dynamic_range
-    elif threshold_type == 'std_relative':
-        std_dev = np.std(image)
-        return threshold_factor * std_dev
-    else:
-        raise ValueError(f"Unknown threshold type: {threshold_type}")
+    match threshold_type:
+        case 'range_relative':
+            low, high = np.percentile(image, [10, 90])
+            return threshold_factor * (high - low)
+        case 'std_relative':
+            std_dev = np.std(image)
+            return threshold_factor * std_dev
+        case _:
+            print(f"Unknown thresholding method:{threshold_type}")
 
 
 def arc_and_corner(center_intensity, circle_intensities, threshold, required_n, cornerness_calculation):
-    """
-    Find qualifying arc from raw intensities and calculate cornerness
-    Returns: cornerness value or 0
-    """
-    circle_intensities = np.array(circle_intensities)
+    """Find qualifying arc from raw intensities and calculate cornerness"""
+    circle_intensities = np.array(circle_intensities, dtype=np.float32)
     cornerness_calculation = cornerness_calculation.lower()
 
     # Create masks
@@ -43,49 +40,66 @@ def arc_and_corner(center_intensity, circle_intensities, threshold, required_n, 
     bright_mask = differences > threshold
     dark_mask = differences < -threshold
 
-    # Find longest contiguous sequences
-    def find_longest_contiguous(mask):
-        if not np.any(mask):
-            return 0
-        # Duplicate to handle wrap-around
-        extended = np.concatenate([mask, mask])
-        max_length = 0
-        current_length = 0
-        for val in extended:
-            if val:
-                current_length += 1
-                max_length = max(max_length, current_length)
-            else:
-                current_length = 0
-        return min(max_length, len(mask))
+    def get_longest_arc_indices(mask):
+        """ duplicate, find arc, modulo indices back"""
 
-    # Only one arc qualify since n > half_circle
-    if find_longest_contiguous(bright_mask) >= required_n:
-        qualifying_differences = differences[bright_mask]
-    elif find_longest_contiguous(dark_mask) >= required_n:
-        qualifying_differences = differences[dark_mask]
+        if not mask.any():
+            return []
+        n = len(mask)
+
+        # Duplicate and concatenate
+        doubled = np.concatenate([mask, mask])
+        # Find where runs start and end (with padding to catch edges)
+        padded = np.pad(doubled, 1, constant_values=False)
+        diff = np.diff(padded.astype(int))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+
+        if len(starts) == 0:
+            return []
+
+        # Filter run (cap at mask length)
+        lengths = ends - starts
+        valid_runs = [(s, l) for s, l in zip(starts, lengths) if l <= n]
+
+        # All True
+        if not valid_runs:
+            return list(range(n))
+
+        # Get the longest run
+        start, length = max(valid_runs, key=lambda x: x[1])
+
+        # Modulo to handle index overshoot
+        return [(start + i) % n for i in range(length)]
+
+    bright_indices = get_longest_arc_indices(bright_mask)
+    dark_indices = get_longest_arc_indices(dark_mask)
+
+    # Select qualifying arc
+    if len(bright_indices) >= required_n and len(bright_indices) >= len(dark_indices):
+        arc_differences = differences[bright_indices]
+    elif len(dark_indices) >= required_n:
+        arc_differences = differences[dark_indices]
     else:
         return 0
 
+    # Calculate cornerness from arc pixels only
     match cornerness_calculation:
-        case 'max_arc_diff':  # Original method
-            if np.mean(qualifying_differences) > 0:
-                return np.sum(qualifying_differences - threshold)
-            else:  # Dark arc
-                return np.sum(-qualifying_differences - threshold)
-        case 'sum_arc_diff':
-            return np.sum(np.abs(qualifying_differences))
+        case 'original':
+            return np.sum(np.abs(arc_differences) - threshold)
+        case 'sum_squared_diff':
+            return np.sum(arc_differences ** 2)
         case 'mean_arc_diff':
-            return np.mean(np.abs(qualifying_differences))
+            return np.mean(np.abs(arc_differences))
         case _:
-            print(f"Unknown cornerness calculation method: {cornerness_calculation}")
+            return 0
 
 
 def fast_pipeline(image,
-                  threshold_type, threshold_factor,
-                  circle_radius=3, n_ratio=0.75,
-                  cornerness_calculation='max_arc_diff',
-                  nms=True, visualize=False):
+                  threshold_type='range_relative', threshold_factor=0.1,
+                  circle_radius=3, n_ratio=0.56,
+                  cornerness_calculation='original',
+                  visualize=False):
     """
     Core FAST detection implementation
     Args:
@@ -94,9 +108,9 @@ def fast_pipeline(image,
         threshold_factor: percentile for range_relative, integer for std_relative
         circle_radius: Bresenham circle radius
         n_ratio: arc ratio to qualify as a corner
-        cornerness_calculation: 'max_arc_diff' or 'sum_arc_diff' or 'mean_arc_diff'
-        nms:whether to apply NMS
-
+        cornerness_calculation: 'original' or 'sum_squared_diff' or 'mean_arc_diff'
+        nms: whether to apply NMS
+        visualize: whether to generate visualization image
     Returns:
         List of tuples (x, y, cornerness)
     """
@@ -105,11 +119,16 @@ def fast_pipeline(image,
     # Validation and sanitization
     if len(image.shape) != 2:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
     circle_offsets = generate_circle_offsets(circle_radius)
+    # cardinal_offsets = [(circle_radius, 0), (0, circle_radius), (-circle_radius, 0), (0, -circle_radius)]
     threshold = calculate_threshold(image, threshold_type, threshold_factor)
     required_n = max(1, int(n_ratio * len(circle_offsets)))
     corner_img = None
     heatmap = None
+
+    # Lightly denoise
+    image = cv2.bilateralFilter(image, 5, 25, 25)
 
     # Create strength map
     height, width = image.shape
@@ -119,6 +138,8 @@ def fast_pipeline(image,
     for y in range(circle_radius, height - circle_radius):
         for x in range(circle_radius, width - circle_radius):
             center_intensity = image[y, x]
+            # cardinal_intensities = [image[y + dy, x + dx] for dx, dy in cardinal_offsets]
+
             circle_intensities = [image[y + dy, x + dx] for dx, dy in circle_offsets]
             cornerness = arc_and_corner(
                 center_intensity, circle_intensities, threshold, required_n, cornerness_calculation
@@ -127,22 +148,24 @@ def fast_pipeline(image,
             if cornerness > 0:
                 strength_map[y, x] = cornerness
 
-    if nms:
-        peaks = peak_local_max(strength_map, min_distance=10, threshold_abs=0)
-        corner_list = [(x, y, strength_map[y, x]) for y, x in peaks]
-    else:
-        y_coords, x_coords = np.nonzero(strength_map)
-        corner_list = [(x, y, strength_map[y, x]) for x, y in zip(x_coords, y_coords)]
+    peaks = peak_local_max(strength_map, min_distance=circle_radius)
+    corner_list = [(x, y, strength_map[y, x]) for y, x in peaks]
+
+    points = np.float32([corner[:2] for corner in corner_list])
+    refined_coords = cv2.cornerSubPix(image, points, (5, 5), (-1, -1),
+                                      (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+    refined_corner_list = [(point[0], point[1], corner_list[i][2])
+                           for i, point in enumerate(refined_coords)]
 
     if visualize:
         corner_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR).astype(np.uint8)
         max_response: float = max(score for _, _, score in corner_list) or 1.0
         for x, y, score in corner_list:
-            radius = int(3 + (score / max_response) * 10)
+            radius = int(2 + (score / max_response) * 4)
             cv2.circle(corner_img, (x, y), radius, (255, 0, 0), 1)
 
         # Create response heatmap
         norm_response = cv2.normalize(strength_map, None, 0, 255, cv2.NORM_MINMAX)
         heatmap = cv2.applyColorMap(norm_response.astype(np.uint8), cv2.COLORMAP_JET)
 
-    return corner_list, corner_img, heatmap
+    return refined_corner_list, corner_img, heatmap
