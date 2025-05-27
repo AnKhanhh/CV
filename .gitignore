@@ -5,4 +5,8 @@ CV.iml
 /resources
 /results
 *.ipynb
-*/tid2013/**
+tid2013
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
