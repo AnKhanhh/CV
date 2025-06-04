@@ -136,11 +136,11 @@ def harris_pipeline(input_img: np.ndarray,
     # 4. Post-processing steps
     # Refine corners to subpixel
     corner_list: List[Tuple[int, int, float]] = [(x, y, harris_response[y, x]) for y, x in coordinates]
-    points = np.float32([corner[:2] for corner in corner_list])
-    refined_coords = cv2.cornerSubPix(input_img, points, (5, 5), (-1, -1),
-                                      (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
-    refined_corner_list = [(point[0], point[1], corner_list[i][2])
-                           for i, point in enumerate(refined_coords)]
+    # points = np.float32([corner[:2] for corner in corner_list])
+    # refined_coords = cv2.cornerSubPix(input_img, points, (5, 5), (-1, -1),
+    #                                   (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+    # refined_corner_list = [(point[0], point[1], corner_list[i][2])
+    #                        for i, point in enumerate(refined_coords)]
 
     if visualize:
         # Create corner marking image
@@ -157,7 +157,7 @@ def harris_pipeline(input_img: np.ndarray,
         corner_img = None
         heatmap = None
 
-    return refined_corner_list, corner_img, heatmap
+    return corner_list, corner_img, heatmap
 
 
 def find_corner_matches(reference_corners, distorted_corners, max_dist_pixel=3.0):

@@ -24,8 +24,8 @@ def print_progress_bar(iteration, total, bar_length=50):
 
 def open_pq():
     # Static variables to modify
-    FILE_PATH = "results/distortion_01/harris_param_combined.parquet"
-    NUM_ROWS = 10  # Number of rows to read (0 for all rows)
+    FILE_PATH = "results/distortion_01/harris_metrics_dist01.parquet"
+    NUM_ROWS = 3  # Number of rows to read (0 for all rows)
 
     try:
         # Read the parquet file
