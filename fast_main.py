@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import pandas as pd
 from skimage.draw import circle_perimeter
+from joblib import Parallel, delayed
 
 import misc
 
@@ -188,152 +189,151 @@ def fast_pipeline(image,
     return corner_list, corner_img, heatmap
 
 
-def fast_wrapper(distortion_no: str,
-                 ref_img_list: List[str],
-                 threshold_config_list: Dict[str, Tuple[float]] = None,
-                 radius_list: Tuple = (3, 4, 5, 8),
-                 n_ratio_list: List[int] = None,
-                 cornerness_method_list: Tuple = ('original', 'sum_squared_diff', 'mean_arc_diff')):
-    import math
+def process_single_parameter_set(param_set, distortion_no, ref_img_list):
+    """Process a single parameter combination across all distortion levels."""
+    threshold_method, threshold_factor, radius, n_ratio, cornerness_method = param_set
 
+    # Compute reference corners once per parameter set
+    ref_corners_dict = _compute_reference_corners(
+        ref_img_list, threshold_method, threshold_factor, radius, n_ratio, cornerness_method
+    )
+
+    # Process all distortion levels for this parameter set
+    results = []
+    for level in range(1, 6):
+        result = _process_distortion_level(
+            distortion_no, level, ref_corners_dict,
+            threshold_method, threshold_factor, radius, n_ratio, cornerness_method
+        )
+        results.append(result)
+
+    return results
+
+
+def _compute_reference_corners(ref_img_list, threshold_method, threshold_factor, radius, n_ratio, cornerness_method):
+    """Compute corners for all reference images with given parameters."""
+    ref_corners_dict = {}
+    for img_no in ref_img_list:
+        ref_image_path = f"tid2013/reference_images/I{img_no}.BMP"
+        ref_image = cv2.imread(ref_image_path, cv2.IMREAD_COLOR)
+        if ref_image is None:
+            continue
+
+        ref_corners, *_ = fast_pipeline(
+            ref_image, threshold_type=threshold_method, threshold_factor=threshold_factor,
+            circle_radius=radius, n_ratio=n_ratio, cornerness_calculation=cornerness_method
+        )
+        ref_corners_dict[img_no] = ref_corners
+    return ref_corners_dict
+
+
+def _process_distortion_level(distortion_no, level, ref_corners_dict, threshold_method,
+                              threshold_factor, radius, n_ratio, cornerness_method):
+    """Process a single distortion level for given parameters."""
+    # Initialize accumulators
+    total_ref_corners = total_matches = total_images = 0
+    sum_repeatability = 0.0
+    loc_distances, resp_ratios = [], []
+
+    for img_no, ref_corners in ref_corners_dict.items():
+        # Load and process distorted image
+        dist_image_path = f"tid2013/distorted_images/i{img_no}_{distortion_no}_{level}.bmp"
+        dist_image = cv2.imread(dist_image_path, cv2.IMREAD_COLOR)
+        if dist_image is None:
+            continue
+
+        dist_corners, *_ = fast_pipeline(
+            dist_image, threshold_type=threshold_method, threshold_factor=threshold_factor,
+            circle_radius=radius, n_ratio=n_ratio, cornerness_calculation=cornerness_method
+        )
+
+        # Find matches with 3px threshold
+        from harris_main import find_corner_matches
+        matches, cost_matrix = find_corner_matches(ref_corners, dist_corners)
+
+        # Update counters
+        total_ref_corners += len(ref_corners)
+        total_matches += len(matches)
+        total_images += 1
+
+        if len(ref_corners) > 0:
+            sum_repeatability += len(matches) / len(ref_corners)
+
+        # Collect match metrics
+        for i_ref, i_dist in matches:
+            loc_distances.append(float(cost_matrix[i_ref, i_dist]))
+            ref_resp, dist_resp = ref_corners[i_ref][2], dist_corners[i_dist][2]
+            resp_ratios.append(float(dist_resp / ref_resp))
+
+    # Compute aggregated metrics
+    mean_repeatability = sum_repeatability / total_images if total_images > 0 else 0.0
+    mean_localization = np.mean(loc_distances) if loc_distances else float('inf')
+    mean_resp_ratio = np.mean(resp_ratios) if resp_ratios else float('nan')
+
+    return {
+        'dt_no': int(distortion_no), 'dt_lv': int(level),
+        'threshold_method': {'range_relative': 0, 'std_relative': 1}.get(threshold_method),
+        'threshold_factor': float(threshold_factor), 'circle_radius': int(radius),
+        'n_ratio': float(n_ratio),
+        'cornerness_method': {'original': 0, 'sum_squared_diff': 1, 'mean_arc_diff': 2}.get(cornerness_method),
+        'total_ref_corners': int(total_ref_corners), 'total_matches': int(total_matches),
+        'sampling_num': int(total_images), 'mean_repeatability': float(mean_repeatability),
+        'mean_localization': float(mean_localization),
+        'mean_resp_ratio': float(mean_resp_ratio),
+    }
+
+
+def fast_wrapper(distortion_no: str, ref_img_list: List[str],
+                 threshold_config_list: Dict[str, Tuple[float]] = None,
+                 radius_list: Tuple = (3, 4, 5, 8), n_ratio_list: List[int] = None,
+                 cornerness_method_list: Tuple = ('original', 'sum_squared_diff', 'mean_arc_diff'),
+                 n_jobs=-1):
+    # Set defaults
     if threshold_config_list is None:
         threshold_config_list = {'range_relative': (0.04, 0.08, 0.12), 'std_relative': (1.0, 2.0, 3.0)}
     if n_ratio_list is None:
-        n_list = [7, 9, 10, 12, 14]
-        n_ratio_list = [(n / 16) for n in n_list]
+        n_ratio_list = [n / 16 for n in [7, 9, 10, 12, 14]]
 
+    # Generate parameter combinations
     unpacked = [(k, v) for k, vals in threshold_config_list.items() for v in vals]
-    total_iter = len(unpacked) * len(radius_list) * len(n_ratio_list) * len(cornerness_method_list)
-    print(f"Processing {total_iter} parameter sets for distortion #{distortion_no} across {len(ref_img_list)} reference images")
+    param_combinations = list(itertools.product(unpacked, radius_list, n_ratio_list, cornerness_method_list))
 
-    # Results list to build our dataframe
-    results_df = []
+    # Flatten parameter tuples for cleaner processing
+    flattened_params = [
+        (threshold_method, threshold_factor, radius, n_ratio, cornerness_method)
+        for (threshold_method, threshold_factor), radius, n_ratio, cornerness_method in param_combinations
+    ]
 
-    param_idx = 0
-    for (threshold_method, threshold_factor), radius, n_ratio, cornerness_method in itertools.product(
-        unpacked, radius_list, n_ratio_list, cornerness_method_list
-    ):
-        param_idx += 1
-        misc.print_progress_bar(param_idx, total_iter)
+    print(f"Processing {len(flattened_params)} parameter sets for distortion #{distortion_no} "
+          f"across {len(ref_img_list)} reference images using {n_jobs} jobs")
 
-        # Pre-calculate for all reference images as ground truth
-        ref_corners_dict = {}
-        for img_no in ref_img_list:
-            ref_image_path = f"tid2013/reference_images/I{img_no}.BMP"
-            ref_image = cv2.imread(ref_image_path, cv2.IMREAD_COLOR)
-            if ref_image is None:
-                print(f"Error loading {ref_image_path}")
-                continue
+    # Parallel processing of parameter sets
+    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(process_single_parameter_set)(param_set, distortion_no, ref_img_list)
+        for param_set in flattened_params
+    )
 
-            ref_corners, *_ = fast_pipeline(ref_image,
-                                            threshold_type=threshold_method,
-                                            threshold_factor=threshold_factor,
-                                            circle_radius=radius,
-                                            n_ratio=n_ratio,
-                                            cornerness_calculation=cornerness_method)
-            ref_corners_dict[img_no] = ref_corners
+    # Flatten results (each parameter set returns 5 distortion levels)
+    flattened_results = [result for param_results in all_results for result in param_results]
 
-        # Process each distortion level
-        for level in (1, 2, 3, 4, 5):
-            # Initialize metrics
-            total_ref_corners = 0
-            total_matches = 0
-            total_images = 0
-            sum_repeatability = 0.0
-            loc_distances = []
-            resp_ratios = []
-            resp_differences = []  # Store difference: reference - distorted
+    # Create and save dataframe
+    df = pd.DataFrame(flattened_results)
 
-            # Process each reference image's distorted version
-            for img_no, ref_corners in ref_corners_dict.items():
-                # Load distorted image
-                dist_image_path = f"tid2013/distorted_images/i{img_no}_{distortion_no}_{level}.bmp"
-                dist_image = cv2.imread(dist_image_path, cv2.IMREAD_COLOR)
-                if dist_image is None:
-                    print(f"Error loading {dist_image_path}")
-                    continue
-
-                # Get corners for distorted image
-                dist_corners, *_ = fast_pipeline(dist_image,
-                                                 threshold_type=threshold_method,
-                                                 threshold_factor=threshold_factor,
-                                                 circle_radius=radius,
-                                                 n_ratio=n_ratio,
-                                                 cornerness_calculation=cornerness_method)
-
-                # Find matches and calculate metrics
-                from harris_main import find_corner_matches
-                matches, cost_matrix = find_corner_matches(ref_corners, dist_corners)
-
-                # Update metrics
-                total_ref_corners += len(ref_corners)
-                total_matches += len(matches)
-                total_images += 1
-
-                # Calculate repeatability for this image
-                if len(ref_corners) > 0:
-                    repeatability = len(matches) / len(ref_corners)
-                    sum_repeatability += repeatability
-
-                # Collect raw localization distances and response differences
-                for i_ref, i_dist in matches:
-                    # Add localization distance
-                    loc_distance = cost_matrix[i_ref, i_dist]
-                    loc_distances.append(float(loc_distance))
-
-                    # Add response metrics
-                    ref_resp = ref_corners[i_ref][2]
-                    dist_resp = dist_corners[i_dist][2]
-                    resp_ratios.append(float(dist_resp / ref_resp))  # Ratio: distorted/reference
-                    resp_differences.append(float(ref_resp - dist_resp))  # Difference: reference - distorted
-
-            # Calculate aggregate metrics
-            mean_repeatability = 0.0
-            if total_images > 0:
-                mean_repeatability = sum_repeatability / total_images
-
-            mean_localization = float('inf')
-            if loc_distances:
-                mean_localization = np.mean(loc_distances)
-
-            mean_resp_ratio = float('nan')
-            if resp_ratios:
-                mean_resp_ratio = np.mean(resp_ratios)
-
-            # Create result row for this parameter set and distortion level
-            result_row = {
-                'dt_no': int(distortion_no),
-                'dt_lv': int(level),
-                'threshold_method': {'range_relative': 0, 'std_relative': 1}.get(threshold_method),
-                'threshold_factor': float(threshold_factor),
-                'circle_radius': int(radius),
-                'n_ratio': float(n_ratio),
-                'cornerness_method': {'original': 0, 'sum_squared_diff': 1, 'mean_arc_diff': 2}.get(cornerness_method),
-                'total_ref_corners': int(total_ref_corners),
-                'total_matches': int(total_matches),
-                'sampling_num': int(total_images),
-                'mean_repeatability': float(mean_repeatability),
-                'mean_localization': float(mean_localization),
-                'loc_distances': loc_distances,  # Raw list of localization distances
-                'mean_resp_ratio': float(mean_resp_ratio),
-                'resp_ratios': resp_ratios,  # Raw list of response ratios
-            }
-
-            # Add to results
-            results_df.append(result_row)
-
-    # Convert to dataframe
-    df = pd.DataFrame(results_df)
-
-    # Convert Python lists to numpy arrays
-    for col in ['loc_distances', 'resp_ratios']:
-        df[col] = df[col].apply(lambda x: np.array(x, dtype=np.float32))
-
-    # Save as Parquet
     os.makedirs(f"results/distortion_{distortion_no}", exist_ok=True)
     output_filename = f"results/distortion_{distortion_no}/fast_metrics_dist{distortion_no}.parquet"
     df.to_parquet(output_filename)
 
     print(f"Data exported to {output_filename}")
-
     return df
+
+
+if __name__ == "__main__":
+    import time
+
+    start_time = time.perf_counter()
+
+    ref_img_list = ["01", "04", "08", "09", "13", "19"]
+    _ = fast_wrapper("01", ref_img_list, n_jobs=14)
+
+    end_time = time.perf_counter()
+    print(f"=== Executed in {(end_time - start_time):.1f}s ===")

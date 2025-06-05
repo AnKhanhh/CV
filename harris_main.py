@@ -209,143 +209,147 @@ def response_degradation(reference_corners, distorted_corners, matches) -> float
     return np.mean(ratios).item()
 
 
-def harris_wrapper(distortion_no: str,
-                   ref_img_list: List[str],
-                   win_size_list: Tuple[int] = (3, 5, 7, 9),
-                   win_type_list: Tuple[str] = ("gaussian", "uniform"),
-                   aperture_size_list: Tuple[int] = (3, 5),
-                   aperture_type_list: Tuple[str] = ("sobel", "prewitt", "scharr"),
-                   k_list: Tuple[float] = (0.04, 0.06, 0.12, 0.16)):
-    """
-    Evaluate Harris performance with parameters across distortion levels.
-    Aggregates metrics across multiple reference images while preserving some raw  values for later
-    """
-    total_iter = len(win_size_list) * len(aperture_size_list) * len(k_list) * len(win_type_list) * len(aperture_type_list)
-    print(f"Processing {total_iter} parameter sets for distortion #{distortion_no} across {len(ref_img_list)} reference images")
+def process_single_harris_parameter_set(param_set, distortion_no, ref_img_list):
+    """Process a single Harris parameter combination across all distortion levels."""
+    win_sz, win_tp, ap_sz, ap_tp, k = param_set
 
-    # Results list to build our dataframe
-    results_df = []
+    # Compute reference corners once per parameter set
+    ref_corners_dict = _compute_harris_reference_corners(
+        ref_img_list, win_sz, win_tp, ap_sz, ap_tp, k
+    )
 
-    # Process each parameter combination
-    param_idx = 0
-    for win_sz, win_tp, ap_sz, ap_tp, k in itertools.product(
+    # Process all distortion levels for this parameter set
+    results = []
+    for level in range(1, 6):
+        result = _process_harris_distortion_level(
+            distortion_no, level, ref_corners_dict,
+            win_sz, win_tp, ap_sz, ap_tp, k
+        )
+        results.append(result)
+
+    return results
+
+
+def _compute_harris_reference_corners(ref_img_list, win_sz, win_tp, ap_sz, ap_tp, k):
+    """Compute Harris corners for all reference images with given parameters."""
+    ref_corners_dict = {}
+    for img_no in ref_img_list:
+        ref_image_path = f"tid2013/reference_images/I{img_no}.BMP"
+        ref_image = cv2.imread(ref_image_path, cv2.IMREAD_COLOR)
+        if ref_image is None:
+            continue
+
+        ref_corners, *_ = harris_pipeline(
+            ref_image, k=k, window_size=win_sz, aperture_size=ap_sz,
+            aperture_type=ap_tp, window_type=win_tp
+        )
+        ref_corners_dict[img_no] = ref_corners
+    return ref_corners_dict
+
+
+def _process_harris_distortion_level(distortion_no, level, ref_corners_dict,
+                                     win_sz, win_tp, ap_sz, ap_tp, k):
+    """Process a single distortion level for given Harris parameters."""
+    # Initialize accumulators
+    total_ref_corners = total_matches = total_images = 0
+    sum_repeatability = 0.0
+    loc_distances, resp_ratios = [], []
+
+    for img_no, ref_corners in ref_corners_dict.items():
+        # Load and process distorted image
+        dist_image_path = f"tid2013/distorted_images/i{img_no}_{distortion_no}_{level}.bmp"
+        dist_image = cv2.imread(dist_image_path, cv2.IMREAD_COLOR)
+        if dist_image is None:
+            continue
+
+        dist_corners, *_ = harris_pipeline(
+            dist_image, aperture_size=ap_sz, aperture_type=ap_tp,
+            window_size=win_sz, window_type=win_tp, k=k
+        )
+
+        matches, cost_matrix = find_corner_matches(ref_corners, dist_corners)
+
+        # Update counters
+        total_ref_corners += len(ref_corners)
+        total_matches += len(matches)
+        total_images += 1
+
+        if len(ref_corners) > 0:
+            sum_repeatability += len(matches) / len(ref_corners)
+
+        # Collect match metrics
+        for i_ref, i_dist in matches:
+            loc_distances.append(float(cost_matrix[i_ref, i_dist]))
+            ref_resp, dist_resp = ref_corners[i_ref][2], dist_corners[i_dist][2]
+            resp_ratios.append(float(dist_resp / ref_resp))
+
+    # Compute aggregated metrics
+    mean_repeatability = sum_repeatability / total_images if total_images > 0 else 0.0
+    mean_localization = np.mean(loc_distances) if loc_distances else float('inf')
+    mean_resp_ratio = np.mean(resp_ratios) if resp_ratios else float('nan')
+
+    return {
+        'dt_no': int(distortion_no), 'dt_lv': int(level),
+        'window_sz': float(win_sz),
+        'window_tp': {'uniform': 0, 'gaussian': 1}.get(win_tp),
+        'aperture_sz': float(ap_sz),
+        'aperture_tp': {'sobel': 0, 'prewitt': 1, 'scharr': 2}.get(ap_tp),
+        'k_val': float(k),
+        'total_ref_corners': int(total_ref_corners), 'total_matches': int(total_matches),
+        'sampling_num': int(total_images), 'mean_repeatability': float(mean_repeatability),
+        'mean_localization': float(mean_localization),
+        'mean_resp_ratio': float(mean_resp_ratio),
+    }
+
+
+def harris_wrapper(distortion_no: str, ref_img_list: List[str],
+                   win_size_list: Tuple = (3, 5, 7, 9),
+                   win_type_list: Tuple = ("gaussian", "uniform"),
+                   aperture_size_list: Tuple = (3, 5),
+                   aperture_type_list: Tuple = ("sobel", "prewitt", "scharr"),
+                   k_list: Tuple = (0.04, 0.06, 0.12, 0.16),
+                   n_jobs=-1):
+    # Generate parameter combinations
+    param_combinations = list(itertools.product(
         win_size_list, win_type_list, aperture_size_list, aperture_type_list, k_list
-    ):
+    ))
 
-        param_idx += 1
-        misc.print_progress_bar(param_idx, total_iter)
+    print(f"Processing {len(param_combinations)} parameter sets for distortion #{distortion_no} "
+          f"across {len(ref_img_list)} reference images using {n_jobs} jobs")
 
-        # Pre-calculate for all reference images as ground truth
-        ref_corners_dict = {}
-        for img_no in ref_img_list:
-            ref_image_path = f"tid2013/reference_images/I{img_no}.BMP"
-            ref_image = cv2.imread(ref_image_path, cv2.IMREAD_COLOR)
-            if ref_image is None:
-                print(f"Error loading {ref_image_path}")
-                continue
+    # Parallel processing of parameter sets
+    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(process_single_harris_parameter_set)(param_set, distortion_no, ref_img_list)
+        for param_set in param_combinations
+    )
 
-            ref_corners, *_ = harris_pipeline(ref_image, k=k, window_size=win_sz, aperture_size=ap_sz,
-                                              aperture_type=ap_tp, window_type=win_tp)
-            ref_corners_dict[img_no] = ref_corners
+    # Flatten results (each parameter set returns 5 distortion levels)
+    flattened_results = [result for param_results in all_results for result in param_results]
 
-        # Process each distortion level
-        for level in (1, 2, 3, 4, 5):
-            # Initialize metrics
-            total_ref_corners = 0
-            total_matches = 0
-            total_images = 0
-            sum_repeatability = 0.0
-            loc_distances = []
-            resp_ratios = []
-            resp_differences = []  # Store difference: reference - distorted
+    # Create and save dataframe
+    df = pd.DataFrame(flattened_results)
 
-            # Process each reference image's distorted version
-            for img_no, ref_corners in ref_corners_dict.items():
-                # Load distorted image
-                dist_image_path = f"tid2013/distorted_images/i{img_no}_{distortion_no}_{level}.bmp"
-                dist_image = cv2.imread(dist_image_path, cv2.IMREAD_COLOR)
-                if dist_image is None:
-                    print(f"Error loading {dist_image_path}")
-                    continue
-
-                # Get corners for distorted image
-                dist_corners, *_ = harris_pipeline(dist_image,
-                                                   aperture_size=ap_sz, aperture_type=ap_tp,
-                                                   window_size=win_sz, window_type=win_tp,
-                                                   k=k)
-
-                # Find matches and calculate metrics
-                matches, cost_matrix = find_corner_matches(ref_corners, dist_corners)
-
-                # Update metrics
-                total_ref_corners += len(ref_corners)
-                total_matches += len(matches)
-                total_images += 1
-
-                # Calculate repeatability for this image
-                if len(ref_corners) > 0:
-                    repeatability = len(matches) / len(ref_corners)
-                    sum_repeatability += repeatability
-
-                # Collect raw localization distances and response differences
-                for i_ref, i_dist in matches:
-                    # Add localization distance
-                    loc_distance = cost_matrix[i_ref, i_dist]
-                    loc_distances.append(float(loc_distance))
-
-                    # Add response metrics
-                    ref_resp = ref_corners[i_ref][2]
-                    dist_resp = dist_corners[i_dist][2]
-                    resp_ratios.append(float(dist_resp / ref_resp))  # Ratio: distorted/reference
-                    resp_differences.append(float(ref_resp - dist_resp))  # Difference: reference - distorted
-
-            # Calculate aggregate metrics
-            mean_repeatability = 0.0
-            if total_images > 0:
-                mean_repeatability = sum_repeatability / total_images
-
-            mean_localization = float('inf')
-            if loc_distances:
-                mean_localization = np.mean(loc_distances)
-
-            mean_resp_ratio = float('nan')
-            if resp_ratios:
-                mean_resp_ratio = np.mean(resp_ratios)
-
-            # Create result row for this parameter set and distortion level
-            result_row = {
-                'dt_no': int(distortion_no),
-                'dt_lv': int(level),
-                'window_sz': float(win_sz),
-                'window_tp': {'uniform': 0, 'gaussian': 1}.get(win_tp),
-                'aperture_sz': float(ap_sz),
-                'aperture_tp': {'sobel': 0, 'prewitt': 1, 'scharr': 2}.get(ap_tp),
-                'k_val': float(k),
-                'total_ref_corners': int(total_ref_corners),
-                'total_matches': int(total_matches),
-                'sampling_num': int(total_images),
-                'mean_repeatability': float(mean_repeatability),
-                'mean_localization': float(mean_localization),
-                'loc_distances': loc_distances,  # Raw list of localization distances
-                'mean_resp_ratio': float(mean_resp_ratio),
-                'resp_ratios': resp_ratios,  # Raw list of response ratios
-            }
-
-            # Add to results
-            results_df.append(result_row)
-
-    # Convert to dataframe
-    df = pd.DataFrame(results_df)
-
-    # Convert Python lists to numpy arrays
-    for col in ['loc_distances', 'resp_ratios']:
-        df[col] = df[col].apply(lambda x: np.array(x, dtype=np.float32))
-
-    # Save as Parquet
     os.makedirs(f"results/distortion_{distortion_no}", exist_ok=True)
     output_filename = f"results/distortion_{distortion_no}/harris_metrics_dist{distortion_no}.parquet"
     df.to_parquet(output_filename)
 
     print(f"Data exported to {output_filename}")
-
     return df
+
+
+if __name__ == "__main__":
+    import time
+
+    start_time = time.perf_counter()
+
+    # brick wall #1: sharp corner, homogeneous, high texture
+    # human face #4: soft corner, low contrast
+    # house row #8: sharp corner, high + low contrast
+    # ship sails #9: soft corner, high texture, varying scales
+    # grass + rocks #13: Heterogeneous, high texture
+    # fence + grass #19: edge-dominant, texture + smooth
+    ref_img_list = ["01", "04", "08", "09", "13", "19"]
+    _ = harris_wrapper("01", ref_img_list, n_jobs=14)
+
+    end_time = time.perf_counter()
+    print(f"=== Executed in {(end_time - start_time):.1f}s ===")
