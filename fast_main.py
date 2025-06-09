@@ -393,7 +393,7 @@ if __name__ == "__main__":
     start_time = time.perf_counter()
 
     ref_img_list = ["01", "04", "08", "09", "13", "19"]
-    _ = fast_wrapper("01", ref_img_list, n_jobs=14)
+    _ = fast_wrapper("17", ref_img_list, n_jobs=14)
 
     end_time = time.perf_counter()
     print(f"=== Executed in {(end_time - start_time):.1f}s ===")

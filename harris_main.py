@@ -4,6 +4,7 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy.optimize import linear_sum_assignment
 from skimage.feature import peak_local_max
 import misc
@@ -349,7 +350,7 @@ if __name__ == "__main__":
     # grass + rocks #13: Heterogeneous, high texture
     # fence + grass #19: edge-dominant, texture + smooth
     ref_img_list = ["01", "04", "08", "09", "13", "19"]
-    _ = harris_wrapper("01", ref_img_list, n_jobs=14)
+    _ = harris_wrapper("17", ref_img_list, n_jobs=14)
 
     end_time = time.perf_counter()
     print(f"=== Executed in {(end_time - start_time):.1f}s ===")

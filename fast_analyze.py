@@ -13,17 +13,17 @@ class ParameterConfig:
     formatter: Optional[callable] = None
 
 
-class HarrisAnalyzer:
-    """Unified Harris corner detector parameter analysis"""
+class FastAnalyzer:
+    """Unified FAST corner detector parameter analysis"""
 
     # Parameter mappings for readability
-    APERTURE_MAP = {0: 'sobel', 1: 'prewitt', 2: 'scharr'}
-    WINDOW_MAP = {0: 'uniform', 1: 'gaussian'}
+    THRESHOLD_MAP = {0: 'range_relative', 1: 'std_relative'}
+    CORNERNESS_MAP = {0: 'original', 1: 'sum_squared_diff', 2: 'mean_arc_diff'}
 
     # Metric configurations
     METRICS = {
         'repeatability': {'transform': lambda x: x, 'higher_better': True},
-        'localization': {'transform': lambda x: 1/(1+x), 'higher_better': True},
+        'localization': {'transform': lambda x: 1 / (1 + x), 'higher_better': True},
         'response_ratio': {'transform': lambda x: np.minimum(x, 1), 'higher_better': True}
     }
 
@@ -49,11 +49,11 @@ class HarrisAnalyzer:
     def _analyze_isolated_parameters(self, top_n: int) -> pd.DataFrame:
         """Analyze individual parameters in isolation"""
         param_configs = [
-            ParameterConfig('k_val', ['k_val']),
-            ParameterConfig('aperture', ['aperture_tp', 'aperture_sz'],
-                            self._format_aperture),
-            ParameterConfig('window', ['window_tp', 'window_sz'],
-                            self._format_window)
+            ParameterConfig('threshold', ['threshold_method', 'threshold_factor'],
+                            self._format_threshold),
+            ParameterConfig('n_ratio', ['n_ratio']),
+            ParameterConfig('cornerness_method', ['cornerness_method'],
+                            self._format_cornerness)
         ]
 
         results = []
@@ -64,13 +64,14 @@ class HarrisAnalyzer:
         results_df = pd.DataFrame(results)
         if not results_df.empty:
             self._print_best_isolated(results_df)
-            self._save_results(results_df, 'harris_params_isolated.parquet')
+            self._save_results(results_df, 'fast_params_isolated.parquet')
 
         return results_df
 
     def _analyze_combined_parameters(self, top_n: int) -> pd.DataFrame:
         """Analyze all parameter combinations"""
-        param_columns = ['k_val', 'aperture_tp', 'aperture_sz', 'window_tp', 'window_sz']
+        param_columns = ['threshold_method', 'threshold_factor', 'circle_radius',
+                         'n_ratio', 'cornerness_method']
         combinations = self.df[param_columns].drop_duplicates()
 
         results = []
@@ -82,7 +83,7 @@ class HarrisAnalyzer:
         results_df = pd.DataFrame(results)
         if not results_df.empty:
             self._print_top_combined(results_df, top_n)
-            self._save_results(results_df, 'harris_param_combined.parquet')
+            self._save_results(results_df, 'fast_param_combined.parquet')
 
         return results_df
 
@@ -126,11 +127,13 @@ class HarrisAnalyzer:
 
         # Build result dictionary
         result = {
-            'k_val': params['k_val'],
-            'aperture_tp': self.APERTURE_MAP.get(params['aperture_tp'], str(params['aperture_tp'])),
-            'aperture_sz': params['aperture_sz'],
-            'window_tp': self.WINDOW_MAP.get(params['window_tp'], str(params['window_tp'])),
-            'window_sz': params['window_sz'],
+            'threshold_method': self.THRESHOLD_MAP.get(params['threshold_method'],
+                                                       str(params['threshold_method'])),
+            'threshold_factor': params['threshold_factor'],
+            'circle_radius': params['circle_radius'],
+            'n_ratio': params['n_ratio'],
+            'cornerness_method': self.CORNERNESS_MAP.get(params['cornerness_method'],
+                                                         str(params['cornerness_method'])),
             'param_str': self._format_param_string(params)
         }
 
@@ -184,7 +187,7 @@ class HarrisAnalyzer:
                 continue
 
             # Filter valid values and create coordinate arrays
-            valid_data = [(i+1, v) for i, v in enumerate(values) if not np.isnan(v)]
+            valid_data = [(i + 1, v) for i, v in enumerate(values) if not np.isnan(v)]
             if not valid_data:
                 result[f'{metric_name}_auc'] = np.nan
                 continue
@@ -211,26 +214,27 @@ class HarrisAnalyzer:
         for metric in metrics:
             result[f'{metric}_{level}'] = np.nan
 
-    def _format_aperture(self, row: pd.Series) -> str:
-        """Format aperture parameter combination"""
-        type_name = self.APERTURE_MAP[row['aperture_tp']]
-        size = int(row['aperture_sz']) if row['aperture_sz'].is_integer() else row['aperture_sz']
-        return f"{type_name}-{size}"
+    def _format_threshold(self, row: pd.Series) -> str:
+        """Format threshold parameter combination"""
+        method_name = self.THRESHOLD_MAP[row['threshold_method']]
+        factor = row['threshold_factor']
+        # Format factor to remove unnecessary decimals
+        factor_str = f"{factor:g}"
+        return f"{method_name}_{factor_str}"
 
-    def _format_window(self, row: pd.Series) -> str:
-        """Format window parameter combination"""
-        type_name = self.WINDOW_MAP[row['window_tp']]
-        size = int(row['window_sz']) if row['window_sz'].is_integer() else row['window_sz']
-        return f"{type_name}-{size}"
+    def _format_cornerness(self, row: pd.Series) -> str:
+        """Format cornerness method parameter"""
+        return self.CORNERNESS_MAP[row['cornerness_method']]
 
     def _format_param_string(self, params: pd.Series) -> str:
         """Format complete parameter string for combined analysis"""
-        ap_type = self.APERTURE_MAP[params['aperture_tp']]
-        win_type = self.WINDOW_MAP[params['window_tp']]
+        threshold_method = self.THRESHOLD_MAP[params['threshold_method']]
+        cornerness_method = self.CORNERNESS_MAP[params['cornerness_method']]
 
-        return (f"k={params['k_val']:.3f}, "
-                f"ap={ap_type}-{params['aperture_sz']}, "
-                f"win={win_type}-{params['window_sz']}")
+        return (f"thresh={threshold_method}_{params['threshold_factor']:g}, "
+                f"radius={params['circle_radius']}, "
+                f"n_ratio={params['n_ratio']:g}, "
+                f"corner={cornerness_method}")
 
     def _print_best_isolated(self, results_df: pd.DataFrame) -> None:
         """Print best parameters for isolated analysis"""
@@ -276,14 +280,14 @@ class HarrisAnalyzer:
         print(f"\nParameter analysis saved to {filepath}")
 
 
-# Convenience functions for backward compatibility
-def calculate_parameter_performance(df: pd.DataFrame, distortion_no: str) -> pd.DataFrame:
-    """Calculate performance metrics for individual parameters (isolated analysis)"""
-    analyzer = HarrisAnalyzer(df, distortion_no)
+# Convenience functions for FAST algorithm analysis
+def calculate_fast_parameter_performance(df: pd.DataFrame, distortion_no: str) -> pd.DataFrame:
+    """Calculate performance metrics for individual FAST parameters (isolated analysis)"""
+    analyzer = FastAnalyzer(df, distortion_no)
     return analyzer.analyze_parameters(mode='isolated')
 
 
-def calculate_parameter_auc_confidence(df: pd.DataFrame, distortion_no: str) -> pd.DataFrame:
-    """Calculate normalized AUC for all parameter combinations"""
-    analyzer = HarrisAnalyzer(df, distortion_no)
+def calculate_fast_parameter_auc_confidence(df: pd.DataFrame, distortion_no: str) -> pd.DataFrame:
+    """Calculate normalized AUC for all FAST parameter combinations"""
+    analyzer = FastAnalyzer(df, distortion_no)
     return analyzer.analyze_parameters(mode='combined')

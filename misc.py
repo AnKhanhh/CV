@@ -2,63 +2,60 @@ import pandas as pd
 import numpy as np
 from pandasgui import show
 
+FILE_PATH = "results/distortion_01/fast_param_combined.parquet"
+NUM_ROWS = 3  # 0 to read all rows
 
-def print_progress_bar(iteration, total, bar_length=50):
+
+def print_parquet_schema(file_path=None):
     """
-    Print a progress bar that updates in place.
+    Print schema information for a parquet file.
+
+    Args:
+        file_path (str, optional): Path to parquet file. Uses global FILE_PATH if None.
     """
-    # Calculate progress and filled positions
-    progress = iteration / total
-    filled_length = int(bar_length * progress)
+    path = file_path or globals().get('FILE_PATH')
+    if not path:
+        raise ValueError("No file path provided and FILE_PATH not found in global namespace")
 
-    # Create the bar
-    bar = '=' * filled_length + ' ' * (bar_length - filled_length)
+    # Read parquet metadata without loading full data
+    df = pd.read_parquet(path, engine='pyarrow')
 
-    # Print the progress bar
-    print(f'\rIteration {iteration}/{total}: [{bar}]', end='')
+    print(f"Schema for: {path}")
+    print(f"Shape: {df.shape}")
+    print("\nColumn Information:")
+    print("-" * 50)
 
-    # Print a newline when complete
-    if iteration == total:
-        print()
+    for col in df.columns:
+        dtype = df[col].dtype
+        null_count = df[col].isnull().sum()
+        print(f"{col:<30} {str(dtype):<15} (nulls: {null_count})")
 
 
 def open_pq():
-    # Static variables to modify
-    FILE_PATH = "results/distortion_01/harris_metrics_dist01.parquet"
-    NUM_ROWS = 3  # Number of rows to read (0 for all rows)
+    # Read the parquet file
+    print(f"Reading file: {FILE_PATH}")
+    df = pd.read_parquet(FILE_PATH)
 
-    try:
-        # Read the parquet file
-        print(f"Reading file: {FILE_PATH}")
-        df = pd.read_parquet(FILE_PATH)
+    # Select specified number of rows if NUM_ROWS > 0
+    if NUM_ROWS > 0:
+        df = df.head(NUM_ROWS)
+        print(f"Displaying first {NUM_ROWS} rows")
+    else:
+        print(f"Displaying all {len(df)} rows")
 
-        # Select specified number of rows if NUM_ROWS > 0
-        if NUM_ROWS > 0:
-            df = df.head(NUM_ROWS)
-            print(f"Displaying first {NUM_ROWS} rows")
-        else:
-            print(f"Displaying all {len(df)} rows")
+    # Handle array columns for display
+    # Convert numpy arrays to lists for better display in pandasgui
+    for col in df.columns:
+        if len(df) > 0 and isinstance(df[col].iloc[0], np.ndarray):
+            df[col] = df[col].apply(lambda x: x.tolist())
 
-        # Handle array columns for display
-        # Convert numpy arrays to lists for better display in pandasgui
-        for col in df.columns:
-            if len(df) > 0 and isinstance(df[col].iloc[0], np.ndarray):
-                df[col] = df[col].apply(lambda x: x.tolist())
+    # Launch pandasgui
+    print("Launching pandas GUI...")
+    gui = show(df, settings={'block': True})
 
-        # Launch pandasgui
-        print("Launching pandas GUI...")
-        gui = show(df, settings={'block': True})
-
-        return gui
-
-    except ImportError:
-        print("pandasgui not installed. Please install it with:")
-        print("pip install pandasgui")
-        return None
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
+    return gui
 
 
 if __name__ == "__main__":
-    open_pq()
+    # print_parquet_schema()
+    print_parquet_schema()
